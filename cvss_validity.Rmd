@@ -1,0 +1,263 @@
+---
+title: "CVSS Validity"
+author: "Sam Maione"
+date: '01-27-25'
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+    theme: spacelab
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pacman)
+pacman::p_load(tidyverse,
+               conflicted,
+               here,
+               cowplot,
+               patchwork,
+               rmarkdown,
+               ggpubr,
+               corrplot,
+               ggcorrplot,
+               poLCA,
+               stringr,
+               FactoMineR,
+               factoextra,
+               psych,
+               GPArotation,
+               readr,
+               rsample,
+               tidymodels,
+               glmnet,
+               parsnip)
+set.seed(421)
+conflict_prefer("here", "here")
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("summarise", "dplyr")
+
+anonymized_data = readRDS(here("full_data.rds"))
+sessionInfo()
+```
+
+# Between-Group Comparisons
+
+```{r}
+three_categories = anonymized_data %>% unite("category", group, diagnosis, sep = "_")
+three_categories$category = recode(three_categories$category, VSS_TRUE = 'VSS_D', VSS_FALSE = 'VSS_UD', Control_FALSE = 'Control')
+
+between_df = data.frame()
+for(metric in names(three_categories[2:41])){
+  new_aov = aov(as.formula(paste(metric, "~ category")), data = three_categories)
+  current_row = c(metric,
+                  mean(three_categories[which(three_categories$category=='VSS_D'),metric]),
+                  mean(three_categories[which(three_categories$category=='VSS_UD'),metric]),
+                  mean(three_categories[which(three_categories$category=='VSS_D' | three_categories$category=='VSS_UD'),metric]),
+                  mean(three_categories[which(three_categories$category=='Control'),metric]),
+                  unlist(summary(new_aov))["Pr(>F)1"],
+                  TukeyHSD(new_aov)$category["VSS_UD-Control","p adj"],
+                  TukeyHSD(new_aov)$category["VSS_D-Control","p adj"],
+                  TukeyHSD(new_aov)$category["VSS_UD-VSS_D","p adj"])
+  between_df = rbind(between_df, current_row)
+}
+names(between_df) = c('metric', 'VSS_Diagnosed_Mean', 'VSS_Undiagnosed_Mean', 'VSS_Total_Mean', 'Control_Mean', 'group_effect_p', 'VSS_UD_v_Control', 'VSS_D_v_Control', 'VSS_D_v_VSS_UD')
+
+between_df[] <- lapply(between_df, function(x) if (all(!is.na(as.numeric(x)), na.rm = TRUE)) as.numeric(x) else x)
+
+between_df = between_df %>%
+  mutate(group_effect_star = as.factor(
+    case_when(group_effect_p < .000025 ~ "***",
+              group_effect_p < .00025 ~ "**",
+              group_effect_p < .00125 ~ "*",
+              group_effect_p < .0025 ~ "~",
+              TRUE ~ " ")
+  ))
+
+between_df = between_df %>%
+  mutate(VSS_UD_v_Control_p = as.factor(
+    case_when(VSS_UD_v_Control < .000025 ~ "***",
+              VSS_UD_v_Control < .00025 ~ "**",
+              VSS_UD_v_Control < .00125 ~ "*",
+              VSS_UD_v_Control < .0025 ~ "~",
+              TRUE ~ " ")
+  ))
+
+between_df = between_df %>%
+  mutate(VSS_D_v_Control_p = as.factor(
+    case_when(VSS_D_v_Control < .000025 ~ "***",
+              VSS_D_v_Control < .00025 ~ "**",
+              VSS_D_v_Control < .00125 ~ "*",
+              VSS_D_v_Control < .0025 ~ "~",
+              TRUE ~ " ")
+  ))
+
+between_df = between_df %>%
+  mutate(VSS_D_v_VSS_UD_p = as.factor(
+    case_when(VSS_D_v_VSS_UD < .000025 ~ "***",
+              VSS_D_v_VSS_UD < .00025 ~ "**",
+              VSS_D_v_VSS_UD < .00125 ~ "*",
+              VSS_D_v_VSS_UD < .0025 ~ "~",
+              TRUE ~ " ")
+  ))
+
+format(between_df, digits = 3)
+```
+
+# Latent Class Analysis
+
+```{r}
+lca_headers = cbind(visualstatic_intensity_a,
+  afterimages_intensity_a,
+          trails_intensity_a,
+          bluefield_intensity_a,
+          floaters_intensity_a,
+          nightvision_intensity_a,
+          tinnitus_intensity_a,
+          depersonalization_intensity_a,
+          anxiety_intensity_a,
+          sadness_intensity_a)~1
+obscured_data = anonymized_data[3:42]
+obscured_data[] = lapply(obscured_data, factor)
+poLCA(lca_headers, obscured_data)
+#42.8% and 57.8%
+
+lca_headers_no_visualstatic = cbind(
+  afterimages_intensity_a,
+          trails_intensity_a,
+          bluefield_intensity_a,
+          floaters_intensity_a,
+          nightvision_intensity_a,
+          tinnitus_intensity_a,
+          depersonalization_intensity_a,
+          anxiety_intensity_a,
+          sadness_intensity_a)~1
+obscured_data = anonymized_data[3:42]
+obscured_data[] = lapply(obscured_data, factor)
+poLCA(lca_headers_no_visualstatic, obscured_data)
+#31.6% and 68.4%
+
+```
+
+# Internal Consistency
+
+```{r}
+cronbach_df = data.frame()
+for(group_category in unique(anonymized_data$group)){
+  group_df = anonymized_data[which(anonymized_data$group == group_category),]
+  symptom = str_extract(names(anonymized_data[3:42]), "^[^_]+")
+  for(current_symptom in symptom){
+    subset_symptom_df = group_df[, grepl(current_symptom, names(group_df))]
+    subset_symptom_df_no_omitted = subset_symptom_df[rowSums(subset_symptom_df != 0) > 0,]
+    current_row = c(group_category, current_symptom, round(cronbach.alpha(subset_symptom_df_no_omitted)[1]$alpha, 2))
+    cronbach_df = rbind(cronbach_df, current_row)
+  }
+}
+
+cronbach_df = cronbach_df[!duplicated(cronbach_df),]
+names(cronbach_df) = c('Group', 'Symptom', 'Alpha')
+
+format(cronbach_df, digits = 3)
+```
+
+# Logistic Regression Analysis
+
+```{r}
+anonymized_data$group = factor(anonymized_data$group)
+split = initial_split(anonymized_data, prop = 0.8, strata = group)
+train = split %>% 
+  training()
+test = split %>% 
+  testing()
+model = logistic_reg(mixture = double(1), penalty = double(1)) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification") %>%
+  fit(group ~ ., data = train)
+tidy(model)
+
+pred_class = predict(model,
+                      new_data = test,
+                      type = "class")
+pred_proba = predict(model,
+                      new_data = test,
+                      type = "prob")
+results = test %>%
+  select(group) %>%
+  bind_cols(pred_class, pred_proba)
+
+accuracy(results, truth = group, estimate = .pred_class) #0.968 estimate for group
+
+log_reg = logistic_reg(mixture = tune(), penalty = tune(), engine = "glmnet")
+grid = grid_regular(mixture(), penalty(), levels = c(mixture = 4, penalty = 3))
+log_reg_wf = workflow() %>%
+  add_model(log_reg) %>%
+  add_formula(group ~ .)
+folds = vfold_cv(train, v = 5)
+log_reg_tuned = tune_grid(
+  log_reg_wf,
+  resamples = folds,
+  grid = grid,
+  control = control_grid(save_pred = TRUE)
+)
+select_best(log_reg_tuned, metric = "roc_auc")
+
+log_reg_final = logistic_reg(penalty = 0.0000000001, mixture = 0) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification") %>%
+  fit(group~., data = train)
+pred_class = predict(log_reg_final,
+                      new_data = test,
+                      type = "class")
+results = test %>%
+  select(group) %>%
+  bind_cols(pred_class, pred_proba)
+
+
+conf_mat(results, truth = group,
+         estimate = .pred_class)
+precision(results, truth = group,
+          estimate = .pred_class)
+recall(results, truth = group,
+       estimate = .pred_class)
+coeff = tidy(log_reg_final) %>% 
+  arrange(desc(abs(estimate))) %>% 
+  filter(estimate > -1)
+
+coeff_unnamed = coeff
+coeff$term = as.factor(coeff$term)
+
+ggplot(coeff, aes(x = estimate, y = term)) + geom_col() + #coord_flip() + 
+  xlab('Estimated Variance') + ylab(' ') +
+  theme_pubr() + theme(legend.position = "none") 
+```
+
+# Principal Component Analysis
+
+```{r}
+obscured_data = anonymized_data[3:42]
+scaled_data = scale(obscured_data)
+pca_data = prcomp(scaled_data, scale = TRUE)
+pca_data$rotation = -1*pca_data$rotation
+pca_data$x = -1*pca_data$x
+biplot(pca_data, scale = 0)
+var_explained = pca_data$sdev^2 / sum(pca_data$sdev^2)
+fviz_pca_var(pca_data, col.var = "black")
+
+factor_loadings = data.frame(pca_data$rotation[,1:2])
+factor_loadings_avg = data.frame(factor_loadings %>%
+  group_by(symptom = (row_number() - 1) %/% 4) %>%
+  summarise(
+    PC1 = mean(PC1)*-1,
+    PC2 = mean(PC2)*-1
+  ))
+
+principal(obscured_data, nfactors = 1, cor = "poly")
+
+format(factor_loadings_avg, digits = 2)
+```
